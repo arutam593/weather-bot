@@ -305,7 +305,7 @@ async def analyze() -> pd.DataFrame:
         return pd.DataFrame()
 
     # Lazy import to avoid circulars
-from src.orchestrator import Orchestrator
+    from src.orchestrator import Orchestrator
     import os, tempfile, yaml as _yaml
 
     # On Streamlit Cloud the local ./data folder doesn't exist and isn't writable.

@@ -28,8 +28,12 @@ from src.polymarket import analyze as polymarket_analyze
 st.set_page_config(page_title="Weather Bot", layout="wide", page_icon="⛅")
 
 # ─── auth gate ───────────────────────────────────────────
-with open("config/auth.yaml") as f:
-    auth_config = yaml.safe_load(f)
+# Read auth config from Streamlit Cloud secrets if available, else local file
+if "auth" in st.secrets and "config_yaml" in st.secrets["auth"]:
+    auth_config = yaml.safe_load(st.secrets["auth"]["config_yaml"])
+else:
+    with open("config/auth.yaml") as f:
+        auth_config = yaml.safe_load(f)
 
 authenticator = stauth.Authenticate(
     auth_config["credentials"],

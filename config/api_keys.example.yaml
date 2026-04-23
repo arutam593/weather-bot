@@ -1,0 +1,24 @@
+# API keys for the weather-bot service.
+#
+# Two ways to declare a key:
+#   • `key:` raw string (DEV only — visible on disk)
+#   • `key_hash:` SHA-256 of the raw key (PROD — keep raw key in your
+#     secret manager and only hash on this side)
+#
+# Generate a hash with:
+#   python -c "import hashlib; print(hashlib.sha256(b'YOUR-RAW-KEY').hexdigest())"
+#
+# Tier governs the rate-limit quota (see src/api/middleware.py):
+#   free     →   10 req/min,    500 req/day
+#   paid     →  100 req/min, 20,000 req/day
+#   internal → 1000 req/min,  1M req/day
+
+keys:
+  - name: dev-local
+    tier: internal
+    key: dev-local-key-CHANGE-ME
+
+  - name: example-paid-customer
+    tier: paid
+    key_hash: 4f5a3a3c6e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e
+    # ↑ replace with the SHA-256 of the customer's raw key

@@ -1,0 +1,17 @@
+355
+2 test 
+20mg wolverine
+50mgx50 var
+
+ 255                                       
+2 24ius HGH
+wolverine 10mg
+Bac water 10ml
+
+
+djia00xx!
+python scripts\setup_auth.py
+python scripts\remove_user.py
+
+
+

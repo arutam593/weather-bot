@@ -1,0 +1,82 @@
+# Weather Prediction Bot — configuration
+# Copy to config.yaml and fill in API keys. Do not commit real keys.
+
+app:
+  name: weather-bot
+  timezone: UTC
+  log_level: INFO
+
+# Initial prior weights per source. The feedback loop updates these over time
+# (see src/feedback/evaluator.py). They are per-variable; unspecified variables
+# fall back to the source's 'default' weight.
+sources:
+  open_meteo:
+    enabled: true
+    default: 1.0
+    reliability:
+      temperature: 1.0
+      precipitation: 0.9
+      wind: 0.95
+  openweathermap:
+    enabled: false                # enable if you have an API key
+    api_key: ""
+    default: 0.8
+  meteostat:
+    enabled: true                 # historical / climate normals
+    default: 1.0
+  rainviewer:
+    enabled: true                 # free, no key needed
+    default: 1.0                  # very high for 0-2h precipitation
+  newsapi:
+    enabled: false
+    api_key: ""
+    default: 0.3                  # news is a weak, noisy signal
+  rss_weather:
+    enabled: true
+    feeds:
+      - https://www.weather.gov/rss_page.php?site_name=alerts
+      - https://alerts.weather.gov/cap/us.php?x=0
+    default: 0.4
+
+# Thresholds for alerts (SI units unless noted). Tune per region.
+alerts:
+  extreme_heat_c: 38
+  extreme_cold_c: -15
+  heavy_rain_mm_per_h: 15
+  severe_wind_ms: 20
+  anomaly_zscore: 3.0
+
+# Model config
+models:
+  short_term:
+    horizon_hours: 72
+    quantiles: [0.1, 0.5, 0.9]
+    retrain_every_hours: 24
+  mid_term:
+    horizon_days: 7
+    retrain_every_hours: 168
+  ensemble:
+    weight_decay_lambda: 0.5      # higher = more reactive to recent skill
+    ema_alpha: 0.2
+  anomaly:
+    isolation_forest_contamination: 0.02
+    cusum_threshold: 4.0
+
+# Feedback loop
+feedback:
+  database_url: "sqlite:///./data/predictions.db"
+  evaluation_lag_hours: 3         # wait before comparing prediction to "actual"
+
+# NLP signal extraction
+nlp:
+  spacy_model: en_core_web_sm
+  severity_keywords:
+    hurricane: 1.0
+    typhoon: 1.0
+    tornado: 0.9
+    blizzard: 0.8
+    flood: 0.7
+    heatwave: 0.7
+    drought: 0.5
+    thunderstorm: 0.4
+    advisory: 0.3

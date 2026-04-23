@@ -1,0 +1,14 @@
+# Locations the scheduler will track. Add entries freely.
+locations:
+  - name: Madrid
+    lat: 40.4168
+    lon: -3.7038
+  - name: London
+    lat: 51.5074
+    lon: -0.1278
+  - name: Tokyo
+    lat: 35.6762
+    lon: 139.6503
+  - name: New York
+    lat: 40.7128
+    lon: -74.0060

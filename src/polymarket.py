@@ -305,8 +305,21 @@ async def analyze() -> pd.DataFrame:
         return pd.DataFrame()
 
     # Lazy import to avoid circulars
-    from src.orchestrator import Orchestrator
-    orch = Orchestrator("config/config.yaml")
+from src.orchestrator import Orchestrator
+    import os, tempfile, yaml as _yaml
+
+    # On Streamlit Cloud the local ./data folder doesn't exist and isn't writable.
+    # Override the database path to live in /tmp before the orchestrator boots.
+    _cfg_path = "config/config.yaml"
+    _patched_cfg = "/tmp/_weatherbot_config.yaml"
+    with open(_cfg_path) as _f:
+        _cfg = _yaml.safe_load(_f)
+    _cfg.setdefault("feedback", {})["database_url"] = (
+        "sqlite:///" + os.path.join(tempfile.gettempdir(), "weather_bot.db"))
+    with open(_patched_cfg, "w") as _f:
+        _yaml.safe_dump(_cfg, _f)
+
+    orch = Orchestrator(_patched_cfg)
 
     rows: list[MarketStat] = []
     for m in weather:

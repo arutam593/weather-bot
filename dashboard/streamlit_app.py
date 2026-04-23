@@ -189,7 +189,17 @@ def df_to_readings(df, lat, lon, source):
 @st.cache_resource(show_spinner=False)
 def get_geo(lat, lon):
     """Geography barely changes. Cache for the lifetime of the process."""
-    return asyncio.run(GeographicAdapter().fetch(lat, lon))
+    import threading, asyncio as _aio
+    result = {}
+    def runner():
+        result["geo"] = _aio.run(GeographicAdapter().fetch(lat, lon))
+    t = threading.Thread(target=runner)
+    t.start(); t.join()
+    return result["geo"]
+
+
+async def run_forecast(lat, lon, name):
+    geo = get_geo(lat, lon)
 
 @st.cache_resource(max_entries=10, show_spinner=False)
 def train_models_cached(lat, lon, _X, _y):

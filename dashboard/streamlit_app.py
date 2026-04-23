@@ -108,7 +108,41 @@ def vars_from_om(block, i):
     }
 
 
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=21600, show_spinner=False)
+def fetch_history(lat, lon):
+    """30 days of past hourly observations. Cached 6 hours."""
+    from datetime import datetime, timedelta, timezone
+    end = datetime.now(timezone.utc).date() - timedelta(days=2)
+    start = end - timedelta(days=30)
+    hist = httpx.get("https://archive-api.open-meteo.com/v1/archive",
+                     params={"latitude": lat, "longitude": lon,
+                             "start_date": start.isoformat(),
+                             "end_date": end.isoformat(),
+                             "hourly": HOURLY_VARS, "timezone": "UTC"},
+                     timeout=30.0).json()
+    h = hist["hourly"]
+    return pd.DataFrame({
+        "valid_time":   pd.to_datetime(h["time"], utc=True),
+        "temp_c":       h["temperature_2m"],
+        "humidity_pct": h["relative_humidity_2m"],
+        "precip_mm":    h["precipitation"],
+        "wind_ms":      [v / 3.6 for v in h["wind_speed_10m"]],
+        "pressure_hpa": h["pressure_msl"],
+        "cloud_pct":    h["cloud_cover"],
+    }).dropna()
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_forecast_only(lat, lon):
+    """7-day live forecast. Cached 10 minutes — Open-Meteo refreshes a few times/day."""
+    return httpx.get("https://api.open-meteo.com/v1/forecast",
+                     params={"latitude": lat, "longitude": lon,
+                             "hourly": HOURLY_VARS, "forecast_days": 7,
+                             "timezone": "UTC", "models": "best_match"},
+                     timeout=30.0).json()
+
+
+# Backwards-compat shim — keeps the old call working
 def fetch_open_meteo(lat, lon):
     from datetime import datetime, timedelta, timezone
     end = datetime.now(timezone.utc).date() - timedelta(days=2)
@@ -152,8 +186,23 @@ def df_to_readings(df, lat, lon, source):
     return out
 
 
+@st.cache_resource(show_spinner=False)
+def get_geo(lat, lon):
+    """Geography barely changes. Cache for the lifetime of the process."""
+    return asyncio.run(GeographicAdapter().fetch(lat, lon))
+
+@st.cache_resource(max_entries=10, show_spinner=False)
+def train_models_cached(lat, lon, _X, _y):
+    """Train short-term model + MOS for a city. Cached for the process lifetime,
+    max 10 cities (oldest evicted). The leading underscores tell Streamlit not
+    to hash the big DataFrames — it caches purely by (lat, lon) instead."""
+    s = ShortTermModel(horizon_hours=168).fit(_X, _y)
+    m = MOSCorrector(alpha=1.0)
+    m.fit(_X, _y, location_key=str(lat) + "," + str(lon))
+    return s, m
+
 async def run_forecast(lat, lon, name):
-    geo = await GeographicAdapter().fetch(lat, lon)
+    geo = get_geo(lat, lon)
     hist_df, fc_data = fetch_open_meteo(lat, lon)
     now = utc_now()
 
@@ -181,9 +230,7 @@ async def run_forecast(lat, lon, name):
     train_frame.X = train_frame.X.dropna()
     train_frame.y = train_frame.y.loc[train_frame.X.index]
 
-    short = ShortTermModel(horizon_hours=168).fit(train_frame.X, train_frame.y)
-    mos = MOSCorrector(alpha=1.0)
-    mos.fit(train_frame.X, train_frame.y, location_key=str(lat) + "," + str(lon))
+    short, mos = train_models_cached(lat, lon, train_frame.X, train_frame.y)
 
     inf_readings = (df_to_readings(hist_df.tail(48).reset_index(),
                                      lat, lon, source="open_meteo")

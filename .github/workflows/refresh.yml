@@ -1,0 +1,23 @@
+﻿name: Refresh Polymarket
+
+on:
+  schedule:
+    # 12:00 UTC = 8am Atlanta (EDT)
+    - cron: "0 12 * * *"
+    # 00:00 UTC = 8pm Atlanta (EDT)
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Hit the refresh endpoint
+        run: |
+          echo "Triggering refresh at $(date -u)"
+          curl --max-time 720 --silent --fail --show-error \
+            "https://poly-weatherbot.streamlit.app/?cron_refresh=1" \
+            | head -c 500
+          echo ""
+          echo "Done"

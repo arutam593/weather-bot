@@ -118,15 +118,14 @@ input, textarea, .stTextInput > div > div > input { background: #151922 !importa
 
 _apply_theme()
 
-# Run daily snapshot resolution once every 23h (cached per session)
-@st.cache_data(ttl=82800, show_spinner=False)
+# Run daily snapshot resolution once every 23h.
+# We check should_run_daily_job() to avoid doing the work on every page view.
 def _maybe_resolve_snapshots():
-    """Fetches actual weather for past snapshots and computes Brier scores."""
     try:
-        n = asyncio.run(accuracy.resolve_due_snapshots())
-        return n
-    except Exception as e:
-        return -1  # sentinel for failure
+        if accuracy.should_run_daily_job():
+            asyncio.run(accuracy.resolve_due_snapshots())
+    except Exception:
+        pass
 _maybe_resolve_snapshots()
 
 

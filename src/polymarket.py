@@ -357,49 +357,166 @@ class MarketStat:
 
 
 async def analyze() -> pd.DataFrame:
-    """Top-level: fetch, filter, parse, score, return a DataFrame."""
+    """Fetch Polymarket weather markets, run a forecast for each parseable
+    one, compare market vs bot probability. Same pipeline as the dashboard
+    ? no orchestrator needed."""
+    import json as _json
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    from src.ingestion.base import SourceReading as _Reading, utc_now as _utc
+    from src.ingestion.geographic import GeographicAdapter as _Geo
+    from src.models.short_term import ShortTermModel as _Short
+    from src.models.mos import MOSCorrector as _MOS
+    from src.models.ensemble import Ensemble as _Ens
+    from src.processing.features import FeatureBuilder as _FB, TARGET_VARIABLES as _TV
+    from src.processing.nlp import WeatherSignalExtractor as _NLP
+
     raw = await fetch_active_markets(limit=500)
     weather = [m for m in raw if is_weather_market(m)]
     log.info("found %d weather markets out of %d active", len(weather), len(raw))
-
     if not weather:
         return pd.DataFrame()
 
-    # Lazy import to avoid circulars
-    from src.orchestrator import Orchestrator
-    import os, tempfile, yaml as _yaml
+    _HOURLY = ("temperature_2m,relative_humidity_2m,precipitation,"
+               "wind_speed_10m,wind_direction_10m,pressure_msl,cloud_cover")
 
-    # On Streamlit Cloud the local ./data folder doesn't exist and isn't writable.
-    # Override the database path to live in /tmp before the orchestrator boots.
-    _cfg_path = "config/config.yaml"
-    _patched_cfg = "/tmp/_weatherbot_config.yaml"
-    with open(_cfg_path) as _f:
-        _cfg = _yaml.safe_load(_f)
-    _cfg.setdefault("feedback", {})["database_url"] = (
-        "sqlite:///" + os.path.join(tempfile.gettempdir(), "weather_bot.db"))
-    with open(_patched_cfg, "w") as _f:
-        _yaml.safe_dump(_cfg, _f)
+    async def _fetch_hist(lat, lon):
+        end = _dt.now(_tz.utc).date() - _td(days=2)
+        start = end - _td(days=30)
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            r = await client.get("https://archive-api.open-meteo.com/v1/archive",
+                params={"latitude": lat, "longitude": lon,
+                        "start_date": start.isoformat(), "end_date": end.isoformat(),
+                        "hourly": _HOURLY, "timezone": "UTC"})
+            r.raise_for_status()
+            return r.json()
 
-    orch = Orchestrator(_patched_cfg)
+    async def _fetch_fc(lat, lon):
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            r = await client.get("https://api.open-meteo.com/v1/forecast",
+                params={"latitude": lat, "longitude": lon,
+                        "hourly": _HOURLY, "forecast_days": 7,
+                        "timezone": "UTC", "models": "best_match"})
+            r.raise_for_status()
+            return r.json()
 
-    rows: list[MarketStat] = []
+    # Per-city cache so we don't retrain for each of Madrid's 5 markets
+    city_cache = {}
+
+    async def _predictions_for(lat, lon, city_name):
+        key = (round(lat, 2), round(lon, 2))
+        if key in city_cache:
+            return city_cache[key]
+        try:
+            geo = await _Geo().fetch(lat, lon)
+            hist_j = await _fetch_hist(lat, lon)
+            fc_j = await _fetch_fc(lat, lon)
+        except Exception as e:
+            log.warning("data fetch failed for %s: %s", city_name, e)
+            city_cache[key] = []
+            return []
+
+        h = hist_j["hourly"]
+        hist_df = pd.DataFrame({
+            "valid_time":   pd.to_datetime(h["time"], utc=True),
+            "temp_c":       h["temperature_2m"],
+            "humidity_pct": h["relative_humidity_2m"],
+            "precip_mm":    h["precipitation"],
+            "wind_ms":      [v / 3.6 for v in h["wind_speed_10m"]],
+            "pressure_hpa": h["pressure_msl"],
+            "cloud_pct":    h["cloud_cover"],
+        }).dropna().set_index("valid_time")
+
+        now = _utc()
+        fc_readings, fc_rows = [], []
+        fh = fc_j["hourly"]
+        for i, t in enumerate(pd.to_datetime(fh["time"], utc=True)):
+            if t < now - pd.Timedelta(hours=1):
+                continue
+            v = {
+                "temp_c":       fh["temperature_2m"][i],
+                "humidity_pct": fh["relative_humidity_2m"][i],
+                "precip_mm":    fh["precipitation"][i],
+                "wind_ms":      fh["wind_speed_10m"][i] / 3.6,
+                "wind_dir_deg": fh["wind_direction_10m"][i],
+                "pressure_hpa": fh["pressure_msl"][i],
+                "cloud_pct":    fh["cloud_cover"][i],
+            }
+            fc_readings.append(_Reading(
+                source="open_meteo", fetched_at=now, valid_time=t,
+                lead_hours=max(0.0, (t - now).total_seconds() / 3600),
+                lat=lat, lon=lon, variables=v, reliability_prior=1.0))
+            fc_rows.append({"valid_time": t, **v})
+
+        def _to_readings(df, src):
+            out = []
+            cols = [c for c in df.columns if c != "valid_time"]
+            for row in df.itertuples():
+                out.append(_Reading(
+                    source=src, fetched_at=now,
+                    valid_time=getattr(row, "valid_time"),
+                    lead_hours=0.0, lat=lat, lon=lon,
+                    variables={c: float(getattr(row, c)) for c in cols
+                               if pd.notna(getattr(row, c))},
+                    reliability_prior=1.0))
+            return out
+
+        try:
+            builder = _FB(geo=geo, normals={})
+            train_readings = _to_readings(hist_df.reset_index(), "open_meteo")
+            truth = hist_df[["temp_c", "precip_mm", "wind_ms"]]
+            nlp_baseline = _NLP({}).extract([], target_location=city_name)
+            train_frame = builder.build_training(train_readings, truth, nlp_baseline)
+            train_frame.X = train_frame.X.dropna()
+            train_frame.y = train_frame.y.loc[train_frame.X.index]
+
+            short = _Short(horizon_hours=168).fit(train_frame.X, train_frame.y)
+            mos = _MOS(alpha=1.0)
+            mos.fit(train_frame.X, train_frame.y,
+                    location_key=str(lat) + "," + str(lon))
+
+            inf_readings = (_to_readings(hist_df.tail(48).reset_index(), "open_meteo")
+                            + fc_readings)
+            inf_frame = builder.build_inference(inf_readings, nlp_baseline)
+            inf_frame.X = inf_frame.X.ffill().fillna(0)
+            sim_now = pd.Timestamp(now)
+            future_X = inf_frame.X[inf_frame.X.index > sim_now]
+
+            short_preds = short.predict(future_X, now=sim_now)
+            consensus = pd.DataFrame({
+                v: future_X["consensus__" + v]
+                for v in _TV if "consensus__" + v in future_X.columns
+            })
+            loc_key = str(lat) + "," + str(lon)
+            mos_consensus = pd.DataFrame({
+                v: mos.correct(future_X, v, loc_key)
+                for v in _TV if (v, loc_key) in mos.models
+            })
+            climate_std = {v: float(train_frame.y[v].std())
+                           for v in train_frame.y.columns}
+            ensemble = _Ens(climate_std=climate_std)
+            preds = ensemble.combine(short_preds, [], consensus,
+                                      mos_consensus=mos_consensus, now=sim_now)
+        except Exception as e:
+            log.warning("forecast pipeline failed for %s: %s", city_name, e)
+            preds = []
+
+        city_cache[key] = preds
+        return preds
+
+    rows = []
     for m in weather:
         try:
             outcome_prices = m.get("outcomePrices") or "[]"
-            if isinstance(outcome_prices, str):
-                import json
-                prices = json.loads(outcome_prices)
-            else:
-                prices = outcome_prices
+            prices = _json.loads(outcome_prices) if isinstance(outcome_prices, str) else outcome_prices
             yes_price = float(prices[0]) if prices else 0.5
         except Exception:
             yes_price = 0.5
 
         end_str = m.get("endDate") or ""
         try:
-            end_dt = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
+            end_dt = _dt.fromisoformat(end_str.replace("Z", "+00:00"))
         except Exception:
-            end_dt = datetime.now(timezone.utc) + timedelta(days=30)
+            end_dt = _dt.now(_tz.utc) + _td(days=30)
 
         parsed = parse_question(m.get("question", ""))
         bot_p = None
@@ -408,14 +525,13 @@ async def analyze() -> pd.DataFrame:
         if parsed.location and parsed.threshold is not None:
             try:
                 lat, lon = _KNOWN_CITIES[parsed.location]
-                result = await orch.run_cycle(
-                    lat, lon, parsed.location,
-                    compute_explanations=False,
-                )
-                bot_p = probability_from_forecast(
-                    result.predictions, parsed, end_dt)
-                if bot_p is None:
-                    note = "could not compute prob"
+                preds = await _predictions_for(lat, lon, parsed.location)
+                if preds:
+                    bot_p = probability_from_forecast(preds, parsed, end_dt)
+                    if bot_p is None:
+                        note = "could not compute prob"
+                else:
+                    note = "no forecast available"
             except Exception as e:
                 note = f"forecast failed: {e}"
         else:
@@ -425,25 +541,20 @@ async def analyze() -> pd.DataFrame:
                 note = "could not parse threshold"
 
         gap = (bot_p - yes_price) if bot_p is not None else None
-
         rows.append(MarketStat(
             question=m.get("question", "")[:200],
             location=parsed.location,
             deadline=end_dt.strftime("%Y-%m-%d"),
-            market_yes_pct=yes_price,
-            bot_yes_pct=bot_p,
-            gap_pct=gap,
-            volume_usd=float(m.get("volume") or 0),
-            note=note,
-        ))
+            market_yes_pct=yes_price, bot_yes_pct=bot_p,
+            gap_pct=gap, volume_usd=float(m.get("volume") or 0),
+            note=note))
 
     df = pd.DataFrame([r.as_row() for r in rows])
-    # Sort by absolute gap (markets where bot disagrees most go first),
-    # but put unparseable ones last.
     df["_gap_sort"] = [abs(r.gap_pct) if r.gap_pct is not None else -1
                        for r in rows]
     df = df.sort_values("_gap_sort", ascending=False).drop(columns=["_gap_sort"])
     return df
+
 
 
 def main():

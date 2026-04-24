@@ -43,6 +43,23 @@ authenticator = stauth.Authenticate(
     auth_config["cookie"]["expiry_days"],
 )
 
+# Headless cron endpoint - hit /?cron_refresh=1 to trigger a full Polymarket
+# refresh without a browser. Used by GitHub Actions twice daily.
+try:
+    _qp = dict(st.query_params)
+    if _qp.get("cron_refresh") == "1":
+        from src.polymarket import analyze as _pm_analyze
+        try:
+            _df = asyncio.run(_pm_analyze())
+            _n = len(_df) if _df is not None else 0
+            st.write("cron_refresh_ok " + str(_n))
+        except Exception as _e:
+            st.write("cron_refresh_error " + str(_e))
+        st.stop()
+except Exception:
+    pass
+
+
 authenticator.login(location="main")
 
 if st.session_state.get("authentication_status") is False:
@@ -78,23 +95,6 @@ def _maybe_resolve_snapshots():
     except Exception as e:
         return -1  # sentinel for failure
 _maybe_resolve_snapshots()
-
-
-# Headless cron endpoint - hit /?cron_refresh=1 to trigger a full Polymarket
-# refresh without a browser. Used by GitHub Actions twice daily.
-try:
-    _qp = dict(st.query_params)
-    if _qp.get("cron_refresh") == "1":
-        from src.polymarket import analyze as _pm_analyze
-        try:
-            _df = asyncio.run(_pm_analyze())
-            _n = len(_df) if _df is not None else 0
-            st.write("cron_refresh_ok " + str(_n))
-        except Exception as _e:
-            st.write("cron_refresh_error " + str(_e))
-        st.stop()
-except Exception:
-    pass
 
 
 HOURLY_VARS = ("temperature_2m,relative_humidity_2m,precipitation,"

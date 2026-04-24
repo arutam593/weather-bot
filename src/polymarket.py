@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 import httpx
 import pandas as pd
+from src import accuracy
 log = logging.getLogger(__name__)
 
 GAMMA_URL = "https://gamma-api.polymarket.com/markets"
@@ -530,6 +531,22 @@ async def analyze() -> pd.DataFrame:
                     bot_p = probability_from_forecast(preds, parsed, end_dt)
                     if bot_p is None:
                         note = "could not compute prob"
+                    else:
+                        # Persist a snapshot for future accuracy scoring
+                        try:
+                            accuracy.record_snapshot(
+                                market_id=str(m.get("id") or m.get("conditionId") or m.get("slug", "")),
+                                question=m.get("question", "")[:500],
+                                city=parsed.location, lat=lat, lon=lon,
+                                variable=parsed.variable,
+                                threshold=parsed.threshold,
+                                threshold_unit=parsed.threshold_unit or "C",
+                                bot_prob_yes=bot_p,
+                                market_prob_yes=yes_price,
+                                target_date=end_dt,
+                            )
+                        except Exception as _e:
+                            log.warning("snapshot save failed: %s", _e)
                 else:
                     note = "no forecast available"
             except Exception as e:

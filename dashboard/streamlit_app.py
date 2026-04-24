@@ -67,6 +67,16 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# Run daily snapshot resolution once every 23h (cached per session)
+@st.cache_data(ttl=82800, show_spinner=False)
+def _maybe_resolve_snapshots():
+    """Fetches actual weather for past snapshots and computes Brier scores."""
+    try:
+        n = asyncio.run(accuracy.resolve_due_snapshots())
+        return n
+    except Exception as e:
+        return -1  # sentinel for failure
+_maybe_resolve_snapshots()
 
 HOURLY_VARS = ("temperature_2m,relative_humidity_2m,precipitation,"
                "wind_speed_10m,wind_direction_10m,pressure_msl,cloud_cover")
@@ -308,7 +318,8 @@ with st.sidebar:
 
 # ─── tabs ────────────────────────────────────────────────
 
-tab_forecast, tab_polymarket = st.tabs(["🌤️ Forecast", "📊 Polymarket"])
+tab_forecast, tab_polymarket, tab_accuracy = st.tabs(
+    ["🌤️ Forecast", "📊 Polymarket", "🎯 Accuracy"])
 
 
 # ─── Polymarket tab ──────────────────────────────────────
@@ -339,6 +350,80 @@ with tab_polymarket:
 
 
 # ─── Forecast tab ────────────────────────────────────────
+
+with tab_accuracy:
+    st.markdown("### How accurate has the bot been?")
+    st.caption(
+        "Every time the bot makes a Polymarket prediction, we save it. "
+        "Once the target date passes, we check what the actual weather did "
+        "and score how the bot performed. Exact-value temperature markets "
+        "are genuinely hard — don't expect 90%+ accuracy.")
+
+    stats = accuracy.get_stats()
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Snapshots saved", stats.get("n_snapshots", 0))
+    c2.metric("Resolved", stats.get("n_resolved", 0))
+    if stats.get("n_resolved", 0) > 0:
+        c3.metric("Binary accuracy",
+                   f"{stats['binary_acc']*100:.0f}%",
+                   help="Fraction where bot's side (≥50%) matched reality")
+        c4.metric("Brier score",
+                   f"{stats['brier_avg']:.3f}",
+                   help="Lower is better. 0.25 = always say 50%. "
+                        "0.0 = perfect. Above 0.25 = worse than a coin flip.")
+    else:
+        c3.metric("Binary accuracy", "—")
+        c4.metric("Brier score", "—")
+
+    if stats.get("n_high_conf", 0) > 0:
+        hits = stats["n_high_conf_hit"]
+        total = stats["n_high_conf"]
+        st.info(f"**High-confidence calibration:** When the bot said YES was "
+                f"≥70% likely, it happened {hits}/{total} times "
+                f"({hits/total*100:.0f}%). A well-calibrated bot would hit "
+                f"~70% here.")
+
+    if stats.get("n_resolved", 0) == 0:
+        st.warning(
+            "No resolved predictions yet. Come back in a few days after "
+            "target dates have passed. Until then, snapshots are being "
+            "recorded every time you refresh the Polymarket tab.")
+    else:
+        df = accuracy.get_resolutions_df()
+        if not df.empty:
+            st.markdown("#### Recent resolutions")
+            show = df.sort_values("resolved_at", ascending=False).head(30).copy()
+            show["bot said YES"] = (show["bot_prob_yes"] * 100).round().astype(int).astype(str) + "%"
+            show["actual °C"]    = show["actual"].round(1)
+            show["target °C"]    = show["target"]
+            show["YES?"]         = show["resolved_yes"].map({True: "✅ YES", False: "❌ NO"})
+            show["correct?"]     = show["correct"].map({True: "✓", False: "✗"})
+            show["brier"]        = show["brier"].round(3)
+            st.dataframe(
+                show[["city", "target °C", "actual °C", "YES?",
+                       "bot said YES", "correct?", "brier"]],
+                use_container_width=True, hide_index=True,
+            )
+
+        daily = accuracy.get_daily_brier()
+        if len(daily) >= 2:
+            st.markdown("#### Brier score over time")
+            fig_acc = go.Figure(go.Scatter(
+                x=daily["date"], y=daily["brier"], mode="lines+markers",
+                line=dict(color="#e74c3c", width=2),
+                marker=dict(size=8),
+                hovertemplate="<b>%{x}</b><br>"
+                              "Brier: %{y:.3f}<br>"
+                              "n: %{customdata}<extra></extra>",
+                customdata=daily["n"],
+            ))
+            fig_acc.update_layout(
+                height=280, margin=dict(l=20, r=20, t=20, b=20),
+                yaxis_title="Brier score (lower = better)",
+                xaxis_title="", plot_bgcolor="white",
+                xaxis=dict(showgrid=True, gridcolor="#f0f0f0"),
+                yaxis=dict(showgrid=True, gridcolor="#f0f0f0", range=[0, 0.5]))
+            st.plotly_chart(fig_acc, use_container_width=True)
 
 with tab_forecast:
     hcol, scol = st.columns([3, 1])

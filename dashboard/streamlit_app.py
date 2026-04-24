@@ -85,6 +85,39 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# ─── theme toggle ────────────────────────────────────────
+if "dark_mode" not in st.session_state:
+    st.session_state.dark_mode = False
+
+def _apply_theme():
+    if st.session_state.get("dark_mode"):
+        st.markdown("""
+<style>
+/* Dark theme overrides */
+.stApp { background: #0e1117; color: #e8e8e8; }
+.stApp * { color-scheme: dark; }
+section[data-testid="stSidebar"] { background: #151922 !important; }
+h1, h2, h3, h4, h5, h6, p, li, label { color: #e8e8e8 !important; }
+.alert-severe { background: #3d1a1a !important; border-left-color: #ff6b6b !important; }
+.alert-warn   { background: #3d2a15 !important; border-left-color: #ffa94d !important; }
+.alert-info   { background: #152a3d !important; border-left-color: #4dabf7 !important; }
+.metric-card  { background: #1a1f2e !important; border: 1px solid #2a3041 !important; }
+.metric-label { color: #9aa0b0 !important; }
+.metric-value { color: #f0f0f0 !important; }
+.section-h    { color: #d0d0d0 !important; border-bottom-color: #2a3041 !important; }
+.pill-ok      { background: #1a3d2a !important; color: #7dd3a0 !important; }
+.pill-bad     { background: #3d1a1a !important; color: #ff8a8a !important; }
+/* Plotly inside dark mode */
+.js-plotly-plot .plotly .bg { fill: #0e1117 !important; }
+/* Dataframes */
+[data-testid="stDataFrame"] { background: #151922 !important; }
+/* Inputs */
+input, textarea, .stTextInput > div > div > input { background: #151922 !important; color: #e8e8e8 !important; }
+</style>
+""", unsafe_allow_html=True)
+
+_apply_theme()
+
 # Run daily snapshot resolution once every 23h (cached per session)
 @st.cache_data(ttl=82800, show_spinner=False)
 def _maybe_resolve_snapshots():
@@ -330,6 +363,7 @@ with st.sidebar:
     live_on = st.toggle("⚡ Auto-refresh", value=False)
     refresh_seconds = st.slider("Interval (s)", 60, 600, 180, 30,
                                  disabled=not live_on)
+    st.toggle("🌙 Dark mode", key="dark_mode")
     show_map = st.checkbox("Show map", value=True)
     run_clicked = st.button("🌤️ Run prediction now", type="primary",
                              use_container_width=True)

@@ -103,6 +103,14 @@ _EXACT_HIGH_PATTERN = re.compile(
     r"highest temperature in .+? be\s*(\d{1,3}(?:\.\d+)?)\s*°?\s*(C|F|Celsius|Fahrenheit)?",
     re.IGNORECASE,
 )
+_RANGE_HIGH_PATTERN = re.compile(
+    r"highest temperature in .+? be between\s*(\d{1,3}(?:\.\d+)?)\s*-\s*(\d{1,3}(?:\.\d+)?)\s*°?\s*(C|F)?",
+    re.IGNORECASE,
+)
+_RANGE_LOW_PATTERN = re.compile(
+    r"lowest temperature in .+? be between\s*(\d{1,3}(?:\.\d+)?)\s*-\s*(\d{1,3}(?:\.\d+)?)\s*°?\s*(C|F)?",
+    re.IGNORECASE,
+)
 _EXACT_LOW_PATTERN = re.compile(
     r"lowest temperature in .+? be\s*(\d{1,3}(?:\.\d+)?)\s*°?\s*(C|F|Celsius|Fahrenheit)?",
     re.IGNORECASE,
@@ -173,8 +181,10 @@ def parse_question(q: str) -> ParsedQuestion:
     ql = q.lower()
 
 # Location: try the built-in list first (fast, no API call)
-    for name, (lat, lon) in _KNOWN_CITIES.items():
-        if name in ql:
+    # Longest-name-first so "new york" wins over "la" substring inside "atlanta".
+    for name, (lat, lon) in sorted(_KNOWN_CITIES.items(),
+                                     key=lambda x: -len(x[0])):
+        if re.search(r"\b" + re.escape(name) + r"\b", ql):
             p.location = name
             break
 
@@ -191,44 +201,75 @@ def parse_question(q: str) -> ParsedQuestion:
                 break
 
     # Temperature threshold
-    # Try "highest temp be N" first (exact-value bets on daily high)
-    m = _EXACT_HIGH_PATTERN.search(q)
+    # 1. Range bets: "highest/lowest temp between X-Y degrees"
+    m = _RANGE_HIGH_PATTERN.search(q)
     if m:
-        p.variable = "temp_max_exact"
+        p.variable = "temp_max_range"
         p.threshold = float(m.group(1))
-        unit_raw = (m.group(2) or "").upper()
-        if unit_raw.startswith("C") or "celsius" in (m.group(2) or "").lower():
+        p.threshold_upper = float(m.group(2))
+        unit_raw = (m.group(3) or "").upper()
+        if unit_raw == "C":
             p.threshold_unit = "C"
-        elif unit_raw.startswith("F") or "fahrenheit" in (m.group(2) or "").lower():
+        elif unit_raw == "F":
             p.threshold_unit = "F"
         else:
-            p.threshold_unit = "F" if 50 <= p.threshold <= 130 else "C"
-        p.direction = "equal"
-    elif _EXACT_LOW_PATTERN.search(q):
-        m = _EXACT_LOW_PATTERN.search(q)
-        p.variable = "temp_min_exact"
-        p.threshold = float(m.group(1))
-        unit_raw = (m.group(2) or "").upper()
-        if unit_raw.startswith("C") or "celsius" in (m.group(2) or "").lower():
-            p.threshold_unit = "C"
-        elif unit_raw.startswith("F") or "fahrenheit" in (m.group(2) or "").lower():
-            p.threshold_unit = "F"
-        else:
-            p.threshold_unit = "F" if 50 <= p.threshold <= 130 else "C"
-        p.direction = "equal"
+            p.threshold_unit = "F" if 30 <= p.threshold <= 130 else "C"
+        p.direction = "in_range"
     else:
-        m = _TEMP_PATTERN.search(q)
-        if m:
-            p.variable = "temp_max"
-            p.threshold = float(m.group(1))
-            unit_raw = (m.group(2) or "").upper()
-            if unit_raw.startswith("C") or "celsius" in (m.group(2) or "").lower():
+        m2 = _RANGE_LOW_PATTERN.search(q)
+        if m2:
+            p.variable = "temp_min_range"
+            p.threshold = float(m2.group(1))
+            p.threshold_upper = float(m2.group(2))
+            unit_raw = (m2.group(3) or "").upper()
+            if unit_raw == "C":
                 p.threshold_unit = "C"
-            elif unit_raw.startswith("F") or "fahrenheit" in (m.group(2) or "").lower():
+            elif unit_raw == "F":
                 p.threshold_unit = "F"
             else:
-                p.threshold_unit = "F" if 50 <= p.threshold <= 130 else "C"
-            p.direction = "above"
+                p.threshold_unit = "F" if 30 <= p.threshold <= 130 else "C"
+            p.direction = "in_range"
+        else:
+            # 2. Exact-value bets: "highest/lowest temp be N degrees"
+            m3 = _EXACT_HIGH_PATTERN.search(q)
+            if m3:
+                p.variable = "temp_max_exact"
+                p.threshold = float(m3.group(1))
+                unit_raw = (m3.group(2) or "").upper()
+                if unit_raw.startswith("C") or "celsius" in (m3.group(2) or "").lower():
+                    p.threshold_unit = "C"
+                elif unit_raw.startswith("F") or "fahrenheit" in (m3.group(2) or "").lower():
+                    p.threshold_unit = "F"
+                else:
+                    p.threshold_unit = "F" if 50 <= p.threshold <= 130 else "C"
+                p.direction = "equal"
+            else:
+                m4 = _EXACT_LOW_PATTERN.search(q)
+                if m4:
+                    p.variable = "temp_min_exact"
+                    p.threshold = float(m4.group(1))
+                    unit_raw = (m4.group(2) or "").upper()
+                    if unit_raw.startswith("C") or "celsius" in (m4.group(2) or "").lower():
+                        p.threshold_unit = "C"
+                    elif unit_raw.startswith("F") or "fahrenheit" in (m4.group(2) or "").lower():
+                        p.threshold_unit = "F"
+                    else:
+                        p.threshold_unit = "F" if 50 <= p.threshold <= 130 else "C"
+                    p.direction = "equal"
+                else:
+                    # 3. Old "reach X degrees" threshold pattern
+                    m5 = _TEMP_PATTERN.search(q)
+                    if m5:
+                        p.variable = "temp_max"
+                        p.threshold = float(m5.group(1))
+                        unit_raw = (m5.group(2) or "").upper()
+                        if unit_raw.startswith("C") or "celsius" in (m5.group(2) or "").lower():
+                            p.threshold_unit = "C"
+                        elif unit_raw.startswith("F") or "fahrenheit" in (m5.group(2) or "").lower():
+                            p.threshold_unit = "F"
+                        else:
+                            p.threshold_unit = "F" if 50 <= p.threshold <= 130 else "C"
+                        p.direction = "above"
 
     # "below" / "under" inverts direction
     if re.search(r"\b(below|under|lower than|<)\b", ql) and p.threshold is not None:
@@ -255,7 +296,7 @@ def probability_from_forecast(predictions: list, parsed: ParsedQuestion,
     would integrate the predictive CDF; for a 3-quantile sparse forecast
     it's enough to fit a piecewise-linear CDF and read it off.
     """
-    if (parsed.variable not in ("temp_max", "temp_min", "temp_max_exact", "temp_min_exact")
+    if (parsed.variable not in ("temp_max", "temp_min", "temp_max_exact", "temp_min_exact", "temp_max_range", "temp_min_range")
             or parsed.threshold is None):
         return None
 
@@ -286,6 +327,31 @@ def probability_from_forecast(predictions: list, parsed: ParsedQuestion,
     # For "max temperature exceeds X by deadline" — at least once → use the max
     # of per-hour probabilities (Bonferroni-ish lower bound; in reality the
     # probabilities are correlated across nearby hours so this is okay).
+    # Range bet: does daily max/min fall in [low, high+1)?
+    if parsed.variable in ("temp_max_range", "temp_min_range"):
+        by_day = {}
+        for pp in relevant:
+            day = pp.valid_time.date()
+            by_day.setdefault(day, []).append(pp)
+        target_day = market_end.date()
+        day_preds = by_day.get(target_day) or (by_day[max(by_day.keys())] if by_day else [])
+        if not day_preds:
+            return None
+        if parsed.variable == "temp_max_range":
+            peak = max(day_preds, key=lambda x: x.point)
+        else:
+            peak = min(day_preds, key=lambda x: x.point)
+        low_c = _f_to_c(parsed.threshold) if parsed.threshold_unit == "F" else parsed.threshold
+        high_c = _f_to_c(parsed.threshold_upper) if parsed.threshold_unit == "F" else parsed.threshold_upper
+        def _cdf(x):
+            if x <= peak.lower:  return 0.05
+            if x >= peak.upper:  return 0.95
+            if x <= peak.point:
+                return 0.1 + 0.4 * (x - peak.lower) / max(peak.point - peak.lower, 1e-9)
+            return 0.5 + 0.4 * (x - peak.point) / max(peak.upper - peak.point, 1e-9)
+        prob = _cdf(high_c + 1.0) - _cdf(low_c)
+        return float(max(0.01, min(0.99, prob)))
+
     # Exact-value bet: does the daily max fall in [N, N+1)?
     if parsed.variable in ("temp_max_exact", "temp_min_exact"):
         by_day = {}

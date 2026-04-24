@@ -24,6 +24,7 @@ from src.processing.features import FeatureBuilder, TARGET_VARIABLES
 from src.processing.nlp import WeatherSignalExtractor
 from src.ingestion.base import SourceReading, utc_now
 from src.polymarket import analyze as polymarket_analyze
+from src import accuracy
 
 st.set_page_config(page_title="Weather Bot", layout="wide", page_icon="⛅")
 

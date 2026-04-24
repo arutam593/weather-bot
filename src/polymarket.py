@@ -97,6 +97,17 @@ _TEMP_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# "Will the highest temperature in X be Y degrees on DATE?" - exact-value bets
+_EXACT_HIGH_PATTERN = re.compile(
+    r"highest temperature in .+? be\s*(\d{1,3}(?:\.\d+)?)\s*°?\s*(C|F|Celsius|Fahrenheit)?",
+    re.IGNORECASE,
+)
+_EXACT_LOW_PATTERN = re.compile(
+    r"lowest temperature in .+? be\s*(\d{1,3}(?:\.\d+)?)\s*°?\s*(C|F|Celsius|Fahrenheit)?",
+    re.IGNORECASE,
+)
+
+
 # Some major cities we can map for the bot. Extend freely.
 _KNOWN_CITIES = {
     "new york": (40.71, -74.01),     "nyc": (40.71, -74.01),
@@ -179,9 +190,10 @@ def parse_question(q: str) -> ParsedQuestion:
                 break
 
     # Temperature threshold
-    m = _TEMP_PATTERN.search(q)
+    # Try "highest temp be N" first (exact-value bets on daily high)
+    m = _EXACT_HIGH_PATTERN.search(q)
     if m:
-        p.variable = "temp_max"
+        p.variable = "temp_max_exact"
         p.threshold = float(m.group(1))
         unit_raw = (m.group(2) or "").upper()
         if unit_raw.startswith("C") or "celsius" in (m.group(2) or "").lower():
@@ -189,9 +201,33 @@ def parse_question(q: str) -> ParsedQuestion:
         elif unit_raw.startswith("F") or "fahrenheit" in (m.group(2) or "").lower():
             p.threshold_unit = "F"
         else:
-            # Heuristic: thresholds 50-130 with no unit are probably °F (US-centric)
             p.threshold_unit = "F" if 50 <= p.threshold <= 130 else "C"
-        p.direction = "above"
+        p.direction = "equal"
+    elif _EXACT_LOW_PATTERN.search(q):
+        m = _EXACT_LOW_PATTERN.search(q)
+        p.variable = "temp_min_exact"
+        p.threshold = float(m.group(1))
+        unit_raw = (m.group(2) or "").upper()
+        if unit_raw.startswith("C") or "celsius" in (m.group(2) or "").lower():
+            p.threshold_unit = "C"
+        elif unit_raw.startswith("F") or "fahrenheit" in (m.group(2) or "").lower():
+            p.threshold_unit = "F"
+        else:
+            p.threshold_unit = "F" if 50 <= p.threshold <= 130 else "C"
+        p.direction = "equal"
+    else:
+        m = _TEMP_PATTERN.search(q)
+        if m:
+            p.variable = "temp_max"
+            p.threshold = float(m.group(1))
+            unit_raw = (m.group(2) or "").upper()
+            if unit_raw.startswith("C") or "celsius" in (m.group(2) or "").lower():
+                p.threshold_unit = "C"
+            elif unit_raw.startswith("F") or "fahrenheit" in (m.group(2) or "").lower():
+                p.threshold_unit = "F"
+            else:
+                p.threshold_unit = "F" if 50 <= p.threshold <= 130 else "C"
+            p.direction = "above"
 
     # "below" / "under" inverts direction
     if re.search(r"\b(below|under|lower than|<)\b", ql) and p.threshold is not None:
@@ -218,7 +254,7 @@ def probability_from_forecast(predictions: list, parsed: ParsedQuestion,
     would integrate the predictive CDF; for a 3-quantile sparse forecast
     it's enough to fit a piecewise-linear CDF and read it off.
     """
-    if (parsed.variable not in ("temp_max", "temp_min")
+    if (parsed.variable not in ("temp_max", "temp_min", "temp_max_exact", "temp_min_exact")
             or parsed.threshold is None):
         return None
 
@@ -249,6 +285,31 @@ def probability_from_forecast(predictions: list, parsed: ParsedQuestion,
     # For "max temperature exceeds X by deadline" — at least once → use the max
     # of per-hour probabilities (Bonferroni-ish lower bound; in reality the
     # probabilities are correlated across nearby hours so this is okay).
+    # Exact-value bet: does the daily max fall in [N, N+1)?
+    if parsed.variable in ("temp_max_exact", "temp_min_exact"):
+        by_day = {}
+        for pp in relevant:
+            day = pp.valid_time.date()
+            by_day.setdefault(day, []).append(pp)
+        target_day = market_end.date()
+        day_preds = by_day.get(target_day)
+        if not day_preds and by_day:
+            day_preds = by_day[max(by_day.keys())]
+        if not day_preds:
+            return None
+        if parsed.variable == "temp_max_exact":
+            peak = max(day_preds, key=lambda x: x.point)
+        else:
+            peak = min(day_preds, key=lambda x: x.point)
+        def _cdf(x):
+            if x <= peak.lower:  return 0.05
+            if x >= peak.upper:  return 0.95
+            if x <= peak.point:
+                return 0.1 + 0.4 * (x - peak.lower) / max(peak.point - peak.lower, 1e-9)
+            return 0.5 + 0.4 * (x - peak.point) / max(peak.upper - peak.point, 1e-9)
+        prob = _cdf(threshold_c + 1.0) - _cdf(threshold_c)
+        return float(max(0.01, min(0.99, prob)))
+
     if parsed.variable == "temp_max":
         per_hour = [p_above(p.lower, p.point, p.upper, threshold_c)
                     for p in relevant]
